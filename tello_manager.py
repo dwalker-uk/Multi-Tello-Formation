@@ -1,3 +1,6 @@
+# Forked from https://github.com/TelloSDK/Multi-Tello-Formation
+# Fork hosted at https://github.com/scubyd/Multi-Tello-Formation to support Python 3
+# Updated and tested with Python 3.7
 import threading
 from threading import Thread
 import socket
@@ -8,6 +11,8 @@ from netaddr import IPNetwork
 from collections import defaultdict
 from stats import Stats
 import binascii
+
+
 class Tello:
     """
     A wrapper class to interact with Tello
@@ -18,6 +23,7 @@ class Tello:
         self.Tello_Manager = Tello_Manager
     def send_command(self, command):
         return self.Tello_Manager.send_command(command, self.tello_ip)
+
 
 class Tello_Manager:
     def __init__(self):
@@ -46,7 +52,7 @@ class Tello_Manager:
         :param num: Number of Tello this method is expected to find
         :return: None
         """
-        print '[Start_Searching]Searching for %s available Tello...\n' % num
+        print('[Start_Searching]Searching for %s available Tello...\n' % num)
 
         subnets, address = self.get_subnets()
         possible_addr = []
@@ -59,7 +65,7 @@ class Tello_Manager:
                 possible_addr.append(str(ip))
 
         while len(self.tello_ip_list) < num:
-            print '[Still_Searching]Trying to find Tello in subnets...\n'
+            print('[Still_Searching]Trying to find Tello in subnets...\n')
 
             # delete already fond Tello
             for tello_ip in self.tello_ip_list:
@@ -147,11 +153,11 @@ class Tello_Manager:
                 cmd = cmd_sof_str + command[3:]
                 self.socket.sendto(cmd.encode('utf-8'), (ip, 8889))
 
-            print '[Multi_Command]----Multi_Send----IP:%s----Command:   %s\n' % (ip, command[3:])           
+            print('[Multi_Command]----Multi_Send----IP:%s----Command:   %s\n' % (ip, command[3:]))
             real_command = command[3:]
         else:
             self.socket.sendto(command.encode('utf-8'), (ip, 8889))
-            print '[Single_Command]----Single_Send----IP:%s----Command:   %s\n' % (ip, command)
+            print('[Single_Command]----Single_Send----IP:%s----Command:   %s\n' % (ip, command))
             real_command = command
         
         self.log[ip].append(Stats(real_command, len(self.log[ip])))
@@ -160,7 +166,7 @@ class Tello_Manager:
             now = time.time()
             diff = now - start
             if diff > self.COMMAND_TIME_OUT:
-                print '[Not_Get_Response]Max timeout exceeded...command: %s \n' % real_command
+                print('[Not_Get_Response]Max timeout exceeded...command: %s \n' % real_command)
                 return    
 
     def _receive_thread(self):
@@ -174,7 +180,7 @@ class Tello_Manager:
                 self.response, ip = self.socket.recvfrom(1024)
                 ip = ''.join(str(ip[0]))
                 if self.response.upper() == 'OK' and ip not in self.tello_ip_list:
-                    print '[Found_Tello]Found Tello.The Tello ip is:%s\n' % ip
+                    print('[Found_Tello]Found Tello.The Tello ip is:%s\n' % ip)
                     self.tello_ip_list.append(ip)
                     self.last_response_index[ip] = 0
                     self.tello_list.append(Tello(ip, self))
@@ -186,16 +192,16 @@ class Tello_Manager:
                     
                     if response_index < self.last_response_index[ip]:
                         #print '--------------------------response_index:%x %x'%(response_index,self.last_response_index)
-                        print'[Multi_Response] ----Multi_Receive----IP:%s----Response:   %s ----\n' % (ip, self.response[7:])
+                        print('[Multi_Response] ----Multi_Receive----IP:%s----Response:   %s ----\n' % (ip, self.response[7:]))
                         self.log[ip][-1].add_response(self.response[7:],ip)
                     self.last_response_index[ip] = response_index
                 else:
-                    print'[Single_Response]----Single_Receive----IP:%s----Response:   %s ----\n' % (ip, self.response)
+                    print('[Single_Response]----Single_Receive----IP:%s----Response:   %s ----\n' % (ip, self.response))
                     self.log[ip][-1].add_response(self.response,ip)
                 #print'[Response_WithIP]----Receive----IP:%s----Response:%s----\n' % (ip, self.response)
                          
-            except socket.error, exc:
-                print "[Exception_Error]Caught exception socket.error : %s\n" % exc
+            except socket.error as exc:
+                print('[Exception_Error]Caught exception socket.error : %s\n' % exc)
 
     def get_log(self):
         return self.log
