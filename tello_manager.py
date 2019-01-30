@@ -1,8 +1,8 @@
 # Forked from https://github.com/TelloSDK/Multi-Tello-Formation
-# Fork hosted at https://github.com/scubyd/Multi-Tello-Formation to support Python 3
+# This fork hosted at https://github.com/scubyd/Multi-Tello-Formation to support Python 3
 # Updated and tested with Python 3.7
+
 import threading
-from threading import Thread
 import socket
 import time
 import netifaces
@@ -10,7 +10,6 @@ import netaddr
 from netaddr import IPNetwork
 from collections import defaultdict
 from stats import Stats
-import binascii
 
 
 class Tello:
@@ -18,14 +17,16 @@ class Tello:
     A wrapper class to interact with Tello
     Communication with Tello is handled by Tello_Manager
     """
-    def __init__(self, tello_ip, Tello_Manager):
+    def __init__(self, tello_ip, tello_manager):
         self.tello_ip = tello_ip
-        self.Tello_Manager = Tello_Manager
+        self.tello_manager = tello_manager
+
     def send_command(self, command):
-        return self.Tello_Manager.send_command(command, self.tello_ip)
+        return self.tello_manager.send_command(command, self.tello_ip)
 
 
-class Tello_Manager:
+class TelloManager:
+
     def __init__(self):
         self.local_ip = ''
         self.local_port = 8889
@@ -46,50 +47,59 @@ class Tello_Manager:
         self.last_response_index = {}
         self.str_cmd_index = {}
 
-    def find_avaliable_tello(self, num):
+    def find_available_tello(self, num, first_ip=1, last_ip=254):
         """
-        Find avaliable tello in server's subnets
+        Find available tello in server's subnets
         :param num: Number of Tello this method is expected to find
+        :param first_ip: First IP address to search
+        :param last_ip: Last IP address to search
         :return: None
         """
-        print('[Start_Searching]Searching for %s available Tello...\n' % num)
+        print('[Start_Searching]Searching for %s available Tello...' % num)
 
         subnets, address = self.get_subnets()
         possible_addr = []
 
         for subnet, netmask in subnets:
             for ip in IPNetwork('%s/%s' % (subnet, netmask)):
-                # skip local and broadcast
-                if str(ip).split('.')[3] == '0' or str(ip).split('.')[3] == '255':
+                # only search addresses between (or equal to) the specified first and last IP addresses
+                if not (first_ip <= int(str(ip).split('.')[3]) <= last_ip):
                     continue
                 possible_addr.append(str(ip))
 
         while len(self.tello_ip_list) < num:
-            print('[Still_Searching]Trying to find Tello in subnets...\n')
+            print('[Still_Searching]Trying to find Tello in subnets...')
 
-            # delete already fond Tello
+            # Delete any Tellos that have already been found from possible_addr list, while we keep searching for the
+            #  remaining Tellos
             for tello_ip in self.tello_ip_list:
                 if tello_ip in possible_addr:
                     possible_addr.remove(tello_ip)
-            # skip server itself
+
+            # Try connecting to each possible_addr, skipping the server's own IP
             for ip in possible_addr:
                 if ip in address:
                     continue
 
-                # record this command
+                # Record this command in the log, and send it
                 self.log[ip].append(Stats('command', len(self.log[ip])))
-                self.socket.sendto(b'command', (ip, 8889))
-            time.sleep(5)
+                self.socket.sendto('command'.encode(), (ip, 8889))
 
-        # filter out non-tello addresses in log
+            # Wait a few seconds for a response before trying again - but regularly check to see if we've already found
+            #  all Tellos, in which case we can break out early
+            for _ in range(1, 8):
+                time.sleep(0.5)
+                if len(self.tello_ip_list) >= num:
+                    break
+
+        # Remove non-Tello addresses from the log, by recreating the log with only Tello-matching entries
         temp = defaultdict(list)
         for ip in self.tello_ip_list:
             temp[ip] = self.log[ip]
         self.log = temp
 
-
-
-    def get_subnets(self):
+    @staticmethod
+    def get_subnets():
         """
         Look through the server's internet connection and
         returns subnet addresses and server ip
@@ -99,21 +109,23 @@ class Tello_Manager:
         subnets = []
         ifaces = netifaces.interfaces()
         addr_list = []
-        for myiface in ifaces:
-            addrs = netifaces.ifaddresses(myiface)
+        for this_iface in ifaces:
+            addrs = netifaces.ifaddresses(this_iface)
 
             if socket.AF_INET not in addrs:
                 continue
-            # Get ipv4 stuff
-            ipinfo = addrs[socket.AF_INET][0]
-            address = ipinfo['addr']
-            netmask = ipinfo['netmask']
 
-            # limit range of search. This will work for router subnets
+            # Get ipv4 stuff
+            ip_info = addrs[socket.AF_INET][0]
+            address = ip_info['addr']
+            netmask = ip_info['netmask']
+
+            # Limit range of search. This will work for router subnets
             if netmask != '255.255.255.0':
                 continue
 
-            # Create ip object and get
+            # Create ip object and get the network details
+            # Note CIDR is a networking term, describing the IP/subnet address format
             cidr = netaddr.IPNetwork('%s/%s' % (address, netmask))
             network = cidr.network
             subnets.append((network, netmask))
@@ -127,37 +139,38 @@ class Tello_Manager:
         """
         Send a command to the ip address. Will be blocked until
         the last command receives an 'OK'.
-        If the command fails (either b/c time out or error),
+        If the command fails (either because of timeout or error),
         will try to resend the command
         :param command: (str) the command to send
         :param ip: (str) the ip of Tello
         :return: The latest command response
         """
-        #global cmd
+
+        # NOTE: Unclear what the multi_cmd flags are for...
         command_sof_1 = ord(command[0])
         command_sof_2 = ord(command[1])
         if command_sof_1 == 0x52 and command_sof_2 == 0x65:
             multi_cmd_send_flag = True
-        else :
+        else:
             multi_cmd_send_flag = False
 
-        if multi_cmd_send_flag == True:      
+        if multi_cmd_send_flag:
             self.str_cmd_index[ip] = self.str_cmd_index[ip] + 1
-            for num in range(1,5):                
-                str_cmd_index_h = self.str_cmd_index[ip]/128 + 1
-                str_cmd_index_l = self.str_cmd_index[ip]%128
+            for num in range(1, 5):
+                str_cmd_index_h = self.str_cmd_index[ip] / 128 + 1
+                str_cmd_index_l = self.str_cmd_index[ip] % 128
                 if str_cmd_index_l == 0:
                     str_cmd_index_l = str_cmd_index_l + 2
-                cmd_sof =[0x52,0x65,str_cmd_index_h,str_cmd_index_l,0x01,num + 1,0x20]
+                cmd_sof = [0x52, 0x65, str_cmd_index_h, str_cmd_index_l, 0x01, num + 1, 0x20]
                 cmd_sof_str = str(bytearray(cmd_sof))
                 cmd = cmd_sof_str + command[3:]
-                self.socket.sendto(cmd.encode('utf-8'), (ip, 8889))
+                self.socket.sendto(cmd.encode(), (ip, 8889))
 
-            print('[Multi_Command]----Multi_Send----IP:%s----Command:   %s\n' % (ip, command[3:]))
+            print('[Multi_Command]----IP:%s----Command:%s' % (ip, command[3:]))
             real_command = command[3:]
         else:
-            self.socket.sendto(command.encode('utf-8'), (ip, 8889))
-            print('[Single_Command]----Single_Send----IP:%s----Command:   %s\n' % (ip, command))
+            self.socket.sendto(command.encode(), (ip, 8889))
+            print('[Single_Command]----IP:%s----Command:%s' % (ip, command))
             real_command = command
         
         self.log[ip].append(Stats(real_command, len(self.log[ip])))
@@ -166,44 +179,45 @@ class Tello_Manager:
             now = time.time()
             diff = now - start
             if diff > self.COMMAND_TIME_OUT:
-                print('[Not_Get_Response]Max timeout exceeded...command: %s \n' % real_command)
-                return    
+                print('[Not_Get_Response]Max timeout exceeded for command: %s' % real_command)
+                return
 
     def _receive_thread(self):
-        """Listen to responses from the Tello.
+        """ Listen to responses from the Tello.
 
-        Runs as a thread, sets self.response to whatever the Tello last returned.
+        Runs continuously in its own thread, setting self.response to whatever the Tello last returned
 
         """
+
         while True:
             try:
                 self.response, ip = self.socket.recvfrom(1024)
+                self.response = self.response.decode()
                 ip = ''.join(str(ip[0]))
+
+                # Capture any new Tellos if they appear during runtime
                 if self.response.upper() == 'OK' and ip not in self.tello_ip_list:
-                    print('[Found_Tello]Found Tello.The Tello ip is:%s\n' % ip)
+                    print('[Found_Tello]----New Tello ip is:%s' % ip)
                     self.tello_ip_list.append(ip)
                     self.last_response_index[ip] = 0
                     self.tello_list.append(Tello(ip, self))
                     self.str_cmd_index[ip] = 1
-                response_sof_part1 = ord(self.response[0])               
+
+                # NOTE: Unclear what Multi_Response represents...
+                response_sof_part1 = ord(self.response[0])
                 response_sof_part2 = ord(self.response[1])
                 if response_sof_part1 == 0x52 and response_sof_part2 == 0x65:
                     response_index = ord(self.response[5])
-                    
                     if response_index < self.last_response_index[ip]:
-                        #print '--------------------------response_index:%x %x'%(response_index,self.last_response_index)
-                        print('[Multi_Response] ----Multi_Receive----IP:%s----Response:   %s ----\n' % (ip, self.response[7:]))
-                        self.log[ip][-1].add_response(self.response[7:],ip)
+                        print('[Multi_Response]----IP:%s----Response:   %s ----' % (ip, self.response[7:]))
+                        self.log[ip][-1].add_response(self.response[7:], ip)
                     self.last_response_index[ip] = response_index
                 else:
-                    print('[Single_Response]----Single_Receive----IP:%s----Response:   %s ----\n' % (ip, self.response))
-                    self.log[ip][-1].add_response(self.response,ip)
-                #print'[Response_WithIP]----Receive----IP:%s----Response:%s----\n' % (ip, self.response)
+                    print('[Single_Response]----IP:%s----Response:%s ----' % (ip, self.response))
+                    self.log[ip][-1].add_response(self.response, ip)
                          
             except socket.error as exc:
-                print('[Exception_Error]Caught exception socket.error : %s\n' % exc)
+                print('[Exception_Error]Caught exception socket.error : %s' % exc)
 
     def get_log(self):
         return self.log
-
-

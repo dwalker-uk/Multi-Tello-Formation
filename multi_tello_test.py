@@ -1,41 +1,45 @@
 # -*- coding: utf-8 -*-
+# Forked from https://github.com/TelloSDK/Multi-Tello-Formation
+# This fork hosted at https://github.com/scubyd/Multi-Tello-Formation to support Python 3
+# Updated and tested with Python 3.7
+
 import sys
-import time
-from tello_manager import *
-import Queue
+import queue
 import time
 import os
-import binascii
-reload(sys)
-sys.setdefaultencoding('utf-8')
+import threading
+from tello_manager import TelloManager
+
 
 def create_execution_pools(num):
     pools = []
-    for x in range(num):
-        execution_pool = Queue.Queue()
+    for _ in range(num):
+        execution_pool = queue.Queue()
         pools.append(execution_pool)
     return pools
 
 
-def drone_handler(tello, queue):
+def drone_handler(tello, drone_queue):
     while True:
-        while queue.empty():
+        while drone_queue.empty():
             pass
-        command = queue.get()
-        tello.send_command(command)
+        next_command = drone_queue.get()
+        tello.send_command(next_command)
 
 
 def all_queue_empty(execution_pools):
-    for queue in execution_pools:
-        if not queue.empty():
+    for pool in execution_pools:
+        if not pool.empty():
             return False
     return True
 
+
 def all_got_response(manager):
-    for tello_log in manager.get_log().values():
-        if not tello_log[-1].got_response():
+    for log in manager.get_log().values():
+        if not log[-1].got_response():
             return False
     return True
+
 
 def save_log(manager):
     log = manager.get_log()
@@ -43,7 +47,7 @@ def save_log(manager):
     if not os.path.exists('log'):
         try:
             os.makedirs('log')
-        except Exception, e:
+        except OSError as e:
             pass
 
     out = open('log/' + start_time + '.txt', 'w')
@@ -52,10 +56,9 @@ def save_log(manager):
         out.write('------\nDrone: %s\n' % cnt)
         cnt += 1
         for stat in stat_list:
-            #stat.print_stats()
-            str = stat.return_stats()
-            out.write(str)
+            out.write(stat.return_stats())
         out.write('\n')
+
 
 def check_timeout(start_time, end_time, timeout):
     diff = end_time - start_time
@@ -63,7 +66,11 @@ def check_timeout(start_time, end_time, timeout):
     return diff > timeout
 
 
-manager = Tello_Manager()
+#
+# Entry point of script!
+#
+
+manager = TelloManager()
 start_time = str(time.strftime("%a-%d-%b-%Y_%H-%M-%S-%Z", time.localtime(time.time())))
 
 try:
@@ -81,131 +88,141 @@ try:
         if command != '' and command != '\n':
             command = command.rstrip()
 
+            # Lines with comments are ignored
             if '//' in command:
                 # ignore comments
                 continue
+
+            # scan is used to search for and add Tellos for later use
             elif 'scan' in command:
                 num_of_tello = int(command.partition('scan')[2])
 
-                manager.find_avaliable_tello(num_of_tello)
+                manager.find_available_tello(num_of_tello)
                 tello_list = manager.get_tello_list()
                 execution_pools = create_execution_pools(num_of_tello)
 
-                for x in range(len(tello_list)):
-                    t1 = Thread(target=drone_handler, args=(tello_list[x], execution_pools[x]))
-                    ip_fid_dict[tello_list[x].tello_ip] = x
-                    #str_cmd_index_dict_init_flag [x] = None
+                for tello_num in range(len(tello_list)):
+                    t1 = threading.Thread(target=drone_handler, args=(tello_list[tello_num],
+                                                                      execution_pools[tello_num]))
+                    ip_fid_dict[tello_list[tello_num].tello_ip] = tello_num
                     t1.daemon = True
                     t1.start()
 
-
+            # Handle sending commands, for either all Tellos (for *>) or a single Tello (with 1>, 2>, etc)
             elif '>' in command:
                 id_list = []
-                id = command.partition('>')[0]
-                if id == '*':
+                tello_num = command.partition('>')[0]
+                if tello_num == '*':
                     for x in range(len(tello_list)):
                         id_list.append(x)
                 else:
-                    # index starbattery_checkt from 1
-                    id_list.append(int(id)-1) 
+                    id_list.append(int(tello_num)-1)
                 action = str(command.partition('>')[2])
 
-                # push command to pools               
+                # Push command to pools, i.e. add the command to the queue, ready to send
+                # Need to translate from Tello Number (1, 2, etc) to its fid, reflecting the order Tellos were found
+                # TODO: Check whether FID and tello_num / tello_id are the same!?
                 for tello_id in id_list:
-                    tmp_sn = id_sn_dict[tello_id]
-                    reflec_ip = sn_ip_dict[tmp_sn]
-                    fid = ip_fid_dict[reflec_ip]
+                    tello_sn = id_sn_dict[tello_id]
+                    tello_ip = sn_ip_dict[tello_sn]
+                    fid = ip_fid_dict[tello_ip]
                     execution_pools[fid].put(action)
 
+            # Get battery levels and check that all Tellos have sufficient power
             elif 'battery_check' in command:
                 
                 threshold = int(command.partition('battery_check')[2])
                 for queue in execution_pools:
                     queue.put('battery?')
 
-                # wait till all commands are executed
+                # Wait until all commands are executed
                 while not all_queue_empty(execution_pools):
-                    time.sleep(0.5)
+                    time.sleep(0.1)
 
-                # wait for new log object append
-                time.sleep(1)
-
-                # wait till all responses are received
+                # Until all responses are received
                 while not all_got_response(manager):
-                    time.sleep(0.5)
+                    time.sleep(0.1)
 
                 for tello_log in manager.get_log().values():
                     battery = int(tello_log[-1].response)
-                    print ('[Battery_Show]show drone battery: %d  ip:%s\n' % (battery,tello_log[-1].drone_ip))
+                    print('[Battery_Status]---IP:%s ----Battery Status: %d' % (tello_log[-1].drone_ip, battery))
                     if battery < threshold:
-                        print('[Battery_Low]IP:%s  Battery < Threshold. Exiting...\n'%tello_log[-1].drone_ip)
+                        print('[Battery_Low]IP:%s ----Battery Below Threshold, Exiting!' % tello_log[-1].drone_ip)
                         save_log(manager)
                         exit(0)
-                print ('[Battery_Enough]Pass battery check\n')
+
+                print('[Battery_Ok]Passed battery check!')
+
+            # Incorporate a delay between commands
             elif 'delay' in command:
                 delay_time = float(command.partition('delay')[2])
-                print ('[Delay_Seconds]Start Delay for %f second\n' %delay_time)
-                time.sleep(delay_time)  
-            elif 'correct_ip' in command:
-                for queue in execution_pools:
-                    queue.put('sn?') 
-                while not all_queue_empty(execution_pools):
-                    time.sleep(0.5)
-                
-                time.sleep(1)
+                print('[Delay_Seconds]Delaying for %fs' % delay_time)
+                time.sleep(delay_time)
 
+            # Used to associate serial numbers with IP addresses
+            elif 'correct_ip' in command:
+
+                for queue in execution_pools:
+                    queue.put('sn?')
+
+                # Wait until all commands are executed
+                while not all_queue_empty(execution_pools):
+                    time.sleep(0.1)
+
+                # Until all responses are received
                 while not all_got_response(manager):
-                    time.sleep(0.5) 
+                    time.sleep(0.1)
+
                 for tello_log in manager.get_log().values():
-                    sn = str(tello_log[-1].response)
+                    tello_sn = str(tello_log[-1].response)
                     tello_ip = str(tello_log[-1].drone_ip)
-                    sn_ip_dict[sn] = tello_ip  
-                    
+                    sn_ip_dict[tello_sn] = tello_ip
+
+            # Used to associate a specific Tello with a number, via its serial number
             elif '=' in command:
-                drone_id = int(command.partition('=')[0])
+                drone_num = int(command.partition('=')[0])
                 drone_sn = command.partition('=')[2]
-                id_sn_dict[drone_id-1] = drone_sn
-                print ('[IP_SN_FID]:Tello_IP:%s------Tello_SN:%s------Tello_fid:%d\n'%(sn_ip_dict[drone_sn],drone_sn,drone_id))
-                #print id_sn_dict[drone_id]
+                id_sn_dict[drone_num-1] = drone_sn
+                print('[IP_SN_FID]:IP:%s----SN:%s----Num:%d\n' % (sn_ip_dict[drone_sn], drone_sn, drone_num))
+
+            # sync is used to force instruction execution to pause until all queued commands are done with a response
             elif 'sync' in command:
                 timeout = float(command.partition('sync')[2])
-                print '[Sync_And_Waiting]Sync for %s seconds \n' % timeout
-                time.sleep(1)
+                print('[Sync_And_Wait]Sync for %ss' % timeout)
+                time.sleep(0.1)
                 try:
                     start = time.time()
-                    # wait till all commands are executed
+                    # Wait until all commands are executed
                     while not all_queue_empty(execution_pools):
                         now = time.time()
                         if check_timeout(start, now, timeout):
                             raise RuntimeError
+                    print('[Sync_Commands_Sent]All queues empty and all commands sent')
 
-                    print '[All_Commands_Send]All queue empty and all command send,continue\n'
-                    # wait till all responses are received
+                    # Wait until all responses are received
                     while not all_got_response(manager):
                         now = time.time()
                         if check_timeout(start, now, timeout):
                             raise RuntimeError
-                    print '[All_Responses_Get]All response got, continue\n'
+                    print('[Sync_Got_Responses]All response received')
+
                 except RuntimeError:
-                    print '[Quit_Sync]Fail Sync:Timeout exceeded, continue...\n'
+                    print('[Quit_Sync]Fail Sync: Timeout exceeded!')
 
-
-    # wait till all commands are executed
+    # Wait until all commands are executed
     while not all_queue_empty(execution_pools):
-        time.sleep(0.5)
+        time.sleep(0.1)
 
-    time.sleep(1)
-
-    # wait till all responses are received
+    # Wait until all responses are received
     while not all_got_response(manager):
-        time.sleep(0.5)
+        time.sleep(0.1)
 
     save_log(manager)
+
 
 except KeyboardInterrupt:
-    print '[Quit_ALL]Multi_Tello_Task got exception. Sending land to all drones...\n'
+    print('[Quit_ALL]Multi_Tello_Task exception. Requesting all drones to land...')
     for ip in manager.tello_ip_list:
-        manager.socket.sendto('land'.encode('utf-8'), (ip, 8889))
+        manager.socket.sendto('land'.encode(), (ip, 8889))
 
     save_log(manager)
-
