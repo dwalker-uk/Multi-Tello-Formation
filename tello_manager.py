@@ -1,4 +1,6 @@
 # Forked from https://github.com/TelloSDK/Multi-Tello-Formation
+# Additional code for reading the state of the Tello is based on
+#  https://github.com/dji-sdk/Tello-Python/blob/master/tello_state.py
 # This fork hosted at https://github.com/scubyd/Multi-Tello-Formation to support Python 3
 # Updated and tested with Python 3.7
 
@@ -28,12 +30,20 @@ class Tello:
 class TelloManager:
 
     def __init__(self):
+
+        # Socket for sending and receiving commands
         self.local_ip = ''
         self.local_port = 8889
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # socket for sending cmd
         self.socket.bind((self.local_ip, self.local_port))
 
-        # thread for receiving cmd ack
+        # Socket for receiving status messages from Tello - needs to be bound by enable_status() function
+        self.status_port = 8890
+        self.status_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.status_thread = None
+        self.status = {}
+
+        # Thread for receiving cmd ack
         self.receive_thread = threading.Thread(target=self._receive_thread)
         self.receive_thread.daemon = True
         self.receive_thread.start()
@@ -135,6 +145,14 @@ class TelloManager:
     def get_tello_list(self):
         return self.tello_list
 
+    def enable_status(self, interval, print_all):
+        self.status_socket.bind((self.local_ip, self.status_port))
+
+        # thread for receiving status
+        self.status_thread = threading.Thread(target=self._receive_status_thread, args=(interval, print_all))
+        self.status_thread.daemon = True
+        self.status_thread.start()
+
     def send_command(self, command, ip):
         """
         Send a command to the ip address. Will be blocked until
@@ -216,6 +234,28 @@ class TelloManager:
                     print('[Single_Response]----IP:%s----Response:%s ----' % (ip, self.response))
                     self.log[ip][-1].add_response(self.response, ip)
                          
+            except socket.error as exc:
+                print('[Exception_Error]Caught exception socket.error : %s' % exc)
+
+    def _receive_status_thread(self, interval, print_all):
+        """ Listen to status messages from the Tello.
+
+            Runs continuously in its own thread, setting self.status[ip] for each Tello
+        """
+
+        while True:
+            try:
+                response, ip = self.status_socket.recvfrom(1024)
+                response = response.decode()
+                if response == 'ok':
+                    continue
+                ip = ''.join(str(ip[0]))
+                self.status[ip] = response
+                if print_all:
+                    print('[%s_State]:--%s--' % (ip, response))
+                # TODO: Interval is too simplistic for multiple Tellos - only gets status from one Tello each interval
+                time.sleep(interval)
+
             except socket.error as exc:
                 print('[Exception_Error]Caught exception socket.error : %s' % exc)
 

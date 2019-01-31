@@ -108,6 +108,16 @@ try:
                     t1.daemon = True
                     t1.start()
 
+            # Enable Status message output, printing each status message
+            elif 'print_status' in command:
+                interval = float(command.partition('print_status')[2])
+                manager.enable_status(interval, True)
+
+            # Enable Status message output, without printing statuses
+            elif 'status' in command:
+                interval = float(command.partition('status')[2])
+                manager.enable_status(interval, False)
+
             # Handle sending commands, for either all Tellos (for *>) or a single Tello (with 1>, 2>, etc)
             elif '>' in command:
                 id_list = []
